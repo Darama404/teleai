@@ -1,0 +1,44 @@
+# ═══════════════════════════════════════════════════════════
+#  /etc/systemd/system/soy-oncall.service
+#
+#  Install:
+#    sudo cp soy-oncall.service /etc/systemd/system/
+#    sudo systemctl daemon-reload
+#    sudo systemctl enable soy-oncall
+#    sudo systemctl start soy-oncall
+#
+#  Logs:
+#    sudo journalctl -u soy-oncall -f
+# ═══════════════════════════════════════════════════════════
+
+[Unit]
+Description=Soy Oncall Bot (Telethon + Flask)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+
+# Sesuaikan path dengan lokasi project kamu
+WorkingDirectory=/home/ubuntu/soy-oncall
+ExecStart=/home/ubuntu/soy-oncall/venv/bin/python telethon.py
+
+# Restart otomatis kalau crash
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Environment
+EnvironmentFile=/home/ubuntu/soy-oncall/.env
+Environment=PYTHONUNBUFFERED=1
+
+# Logging ke journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=soy-oncall
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,4 @@
+telethon[full]
+flask
+python-dotenv
+requests
