@@ -68,23 +68,25 @@ REPLY_POOL=(
 SYSADMIN_KEYWORDS=(
   server vps vm instance cloud hosting
   network jaringan koneksi connection ip dns firewall bandwidth latency ping timeout port
-  nginx apache caddy haproxy traefik
+  nginx apache caddy haproxy traefik cf cloudflare
   database db mysql postgres postgresql mongodb redis mariadb sqlite
   down error crash restart reboot hang stuck
-  mati ngadat lemot slow failed fail
+  mati ngadat lemot slow failed fail berat gangguan
   "not responding" "tidak bisa" gabisa "ga bisa" "gak bisa"
   "500" "502" "503" "504"
   deploy deployment docker container kubernetes k8s pod image build pipeline
-  ssl certificate cert https domain expired
-  monitoring log alert grafana prometheus zabbix
+  ssl certificate cert https domain expired seo robots ipos
+  monitoring log alert grafana prometheus zabbix statistic
   disk storage backup restore penuh
   ssh akses access login credentials permission denied
-  website web api endpoint service aplikasi app
+  website web api endpoint service aplikasi app bot config link banner
+  pgsoft pragmatic provider
+  resolve pointing upgrade
   "tidak jalan" "ga jalan" "gak jalan" "tidak berjalan"
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-log() { echo "[$(date '+%F %T')] $*"; }
+log() { echo "[$(date '+%F %T')] $*" >&2; }
 
 # ── Random delay ──────────────────────────────────────────────────────────────
 random_delay() {
@@ -328,7 +330,7 @@ keyword_check() {
 groq_scope_check() {
   local user_message="$1"
 
-  local system_prompt='Kamu adalah classifier yang menentukan apakah pesan termasuk scope kerja sysadmin/IT infrastructure. Scope sysadmin: server down, deployment error, database issue, jaringan bermasalah, SSL/DNS, monitoring, error aplikasi/website, akses server, masalah teknis infrastruktur. Di luar scope: bisnis, keuangan, HR, sales, keluhan non-teknis. Jawab HANYA dalam format JSON tanpa markdown: {"is_sysadmin": true atau false, "confidence": "high/medium/low"}'
+  local system_prompt='Kamu adalah classifier yang menentukan apakah pesan termasuk scope kerja IT Support / Sysadmin. Scope pekerjaan ini meliputi: server down, deployment error, database, jaringan, SSL/DNS, monitoring, akses server, konfigurasi bot, setup domain (domain rotator, SEO, protection), kendala Cloudflare (CF), integrasi provider game (pgsoft, pragmatic, dll), perbaikan link/banner, pengecekan statistik/upgrade aplikasi, dan segala laporan gangguan/error/lambat (berat) dari user. Jika pesan meminta "bantu cek", "tolong proses", atau melaporkan kendala teknis/sistem, anggap itu IN-SCOPE (true). Di luar scope HANYA: pertanyaan murni bisnis, keuangan (deposit/withdraw), HR, atau hal yang 100% tidak ada hubungannya dengan teknis/sistem. Jawab HANYA dalam format JSON tanpa markdown: {"is_sysadmin": true atau false, "confidence": "high/medium/low"}'
 
   local payload
   payload=$(python3 - "$GROQ_MODEL" "$system_prompt" "$user_message" <<'PYEOF'
@@ -482,7 +484,7 @@ PYEOF
       python3 -c "import json,sys; print(json.load(sys.stdin).get('receipt',''))" 2>/dev/null)
     echo "$receipt"
   else
-    log "   ❌ Pushover gagal ($http_code)"
+    log "   ❌ Pushover gagal ($http_code): $(echo "$resp" | sed '$d')"
     echo ""
   fi
 }
@@ -579,6 +581,22 @@ handle_trigger() {
     log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     return 0
   fi
+
+  # [1.5] Cooldown check (3 menit) per chat
+  local now
+  now=$(date +%s)
+  local cooldown_file="${TMP_DIR}/soy_cooldown_${chat_id}"
+  if [[ -f "$cooldown_file" ]]; then
+    local last_time
+    last_time=$(cat "$cooldown_file" 2>/dev/null || echo 0)
+    local diff=$((now - last_time))
+    if [[ "$diff" -lt 180 ]]; then
+      log "   ⏭️  SKIP: Cooldown 3 menit masih aktif (sudah reply ${diff}s yang lalu)"
+      log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      return 0
+    fi
+  fi
+  echo "$now" > "$cooldown_file"
 
   # [2] Forward ke group internal sysadmin
   log "   ⏳ Forward ke group internal..."
