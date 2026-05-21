@@ -55,12 +55,18 @@ DEV_TAG="${DEV_TAG:-@developer}"   # tag developer untuk out-of-scope
 LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/incidents}"
 TMP_DIR="${TMPDIR:-/tmp}"
 
-# ── Reply pool (in-scope) ─────────────────────────────────────────────────────
+# ── Reply pool (in-scope fallback) ────────────────────────────────────────────
 REPLY_POOL=(
-  "Checking ko"
-  "On check ko"
-  "Siap ko"
-  "Noted ko"
+  "siap ko, dcek bentar ya"
+  "oke ko, otw cek"
+  "siap ko, dcek dl"
+  "ok ko, bentar dcek dlu"
+  "noted ko, otw dcek"
+  "siaap ko, dcek bentar"
+  "bentar ya ko, lg dcek"
+  "ok ko, dcek dulu"
+  "siap ko, langsung dicek"
+  "otw cek ko"
 )
 
 # ── Keyword sysadmin — guardrail sebelum hit Groq ─────────────────────────────
@@ -88,16 +94,47 @@ SYSADMIN_KEYWORDS=(
 # ─────────────────────────────────────────────────────────────────────────────
 log() { echo "[$(date '+%F %T')] $*" >&2; }
 
-# ── Random delay ──────────────────────────────────────────────────────────────
+# ── Dynamic Random delay (Human-like) ─────────────────────────────────────────
 random_delay() {
-  python3 -c "
-import random, time
-mn = float('${DELAY_MIN}')
-mx = float('${DELAY_MAX}')
-d  = round(random.uniform(mn, mx), 1)
+  local msg_text="$1"
+  local reply_text="$2"
+  local has_image="${3:-}"
+  local is_sleep="${4:-false}"
+
+  python3 - "$msg_text" "$reply_text" "$has_image" "$is_sleep" <<'PYEOF'
+import sys, time, random
+
+msg = sys.argv[1]
+reply = sys.argv[2]
+has_img = sys.argv[3] == "yes" or sys.argv[3] == "true"
+is_sleep = sys.argv[4] == "true"
+
+# 1. Reading time (approx 0.15s - 0.25s per word)
+words = len(msg.split())
+read_time = words * random.uniform(0.15, 0.25)
+
+# 2. Image viewing time (if image is present, add 1.5s - 3.0s)
+img_time = random.uniform(1.5, 3.0) if has_img else 0.0
+
+# 3. Thinking time / Decision jitter
+if is_sleep:
+    # At night, simulate waking up/finding phone: 12.0s - 25.0s
+    think_time = random.uniform(12.0, 25.0)
+else:
+    # During the day: 1.0s - 2.5s
+    think_time = random.uniform(1.0, 2.5)
+
+total_delay = read_time + img_time + think_time
+
+if is_sleep:
+    total_delay = min(max(total_delay, 12.0), 30.0)
+else:
+    total_delay = min(max(total_delay, 2.0), 7.0)
+
+d = round(total_delay, 1)
 print(d)
 time.sleep(d)
-"
+PYEOF
 }
 
 # ── Random pick dari reply pool ───────────────────────────────────────────────
@@ -370,6 +407,55 @@ except Exception as e:
 PYEOF
 }
 
+# ── [6a] Groq LLM human reply generation ──────────────────────────────────────
+# Return: teks reply contextual, atau kosong jika gagal
+groq_generate_human_reply() {
+  local user_message="$1"
+
+  local system_prompt='Kamu adalah asisten sysadmin / IT support. Tugasmu adalah memberikan balasan singkat (acknowledgment) bahwa kamu sedang mengecek kendala yang dilaporkan oleh user.
+Aturan penting:
+1. Gunakan bahasa chat santai Indonesia (lowercase/huruf kecil semua, boleh pakai singkatan umum seperti dcek, dlu, lg, otw, bentar, ok/oke, siap).
+2. Jika user memanggil "ko" atau "koko", gunakan sapaan "ko" di balasanmu. Contoh: "siap ko, otw cek", "oke ko, bentar dcek dlu".
+3. JANGAN terlalu formal (hindari "Halo", "Baik, saya akan...", "Terima kasih").
+4. Buat balasanmu singkat dan jika memungkinkan, buat kontekstual berdasarkan apa yang dilaporkan secara ringkas (contoh: "oke ko, bentar dcek ipos nya", "siap ko, otw ping servernya", "siap dcek dlu ssl nya ko").
+5. Jawab HANYA teks balasannya saja, tanpa tanda kutip, tanpa penjelasan, dan tanpa markdown.'
+
+  local payload
+  payload=$(python3 - "$GROQ_MODEL" "$system_prompt" "$user_message" <<'PYEOF'
+import json, sys
+print(json.dumps({
+  "model": sys.argv[1],
+  "messages": [
+    {"role": "system", "content": sys.argv[2]},
+    {"role": "user",   "content": f'Pesan: "{sys.argv[3]}"'}
+  ],
+  "max_tokens": 48,
+  "temperature": 0.8
+}))
+PYEOF
+)
+
+  local resp
+  resp=$(curl -s -X POST "https://api.groq.com/openai/v1/chat/completions" \
+    -H "Authorization: Bearer $GROQ_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "$payload")
+
+  python3 - "$resp" <<'PYEOF'
+import json, sys
+try:
+    data    = json.loads(sys.argv[1])
+    content = data["choices"][0]["message"]["content"].strip()
+    if content.startswith('"') and content.endswith('"'):
+        content = content[1:-1]
+    if content.startswith("'") and content.endswith("'"):
+        content = content[1:-1]
+    print(content.strip())
+except Exception as e:
+    print("")
+PYEOF
+}
+
 # ── [5] Determine scope — gabungan keyword + LLM + image ─────────────────────
 # Return: "in" atau "out"
 determine_scope() {
@@ -626,6 +712,10 @@ handle_trigger() {
     rm -f "$img_tmp"
   fi
 
+  # Strip mention dari text untuk LLM & delay
+  local clean_text
+  clean_text=$(echo "$message_text" | sed 's/@[A-Za-z0-9_]*//g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
   # [5] Scope detection
   log "   🔎 Scope detection..."
   local scope
@@ -634,9 +724,15 @@ handle_trigger() {
   # [6] Generate reply
   local reply_text scope_label
   if [[ "$scope" == "in" ]]; then
-    reply_text=$(random_reply)
     scope_label="IN SCOPE"
-    log "   ✅ $scope_label → reply: '$reply_text'"
+    log "   🤖 Generating human-like contextual reply..."
+    reply_text=$(groq_generate_human_reply "$clean_text")
+    if [[ -z "$reply_text" ]]; then
+      reply_text=$(random_reply)
+      log "   ⚠️  Groq reply failed, fallback to pool: '$reply_text'"
+    else
+      log "   ✅ $scope_label (Groq reply) → reply: '$reply_text'"
+    fi
   else
     reply_text="cc $DEV_TAG"
     scope_label="OUT OF SCOPE"
@@ -649,10 +745,19 @@ handle_trigger() {
   scope_update+="💡 <b>Reply:</b> <code>$reply_text</code>"
   send_telegram "$INTERNAL_CHAT_ID" "$scope_update" || true
 
-  # [7] Human-like delay
-  log "   ⏳ Human delay (${DELAY_MIN}–${DELAY_MAX}s)..."
+  # [7] Human-like delay (Reading + Image viewing + Thinking/Waking up time)
+  local has_img_flag="false"
+  if [[ -n "$media_info" ]]; then
+    has_img_flag="true"
+  fi
+  local is_sleep="false"
+  if is_sleep_hours "$(get_current_minutes)"; then
+    is_sleep="true"
+  fi
+
+  log "   ⏳ Human delay (reading & thinking delay)..."
   local actual_delay
-  actual_delay=$(random_delay)
+  actual_delay=$(random_delay "$clean_text" "$reply_text" "$has_img_flag" "$is_sleep")
   log "   ✓ Delay selesai (${actual_delay}s)"
 
   # [8] Kirim reply via Telethon
